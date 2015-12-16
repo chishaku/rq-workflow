@@ -195,17 +195,30 @@ class Queue(object):
         # parent's dependents instead of enqueueing it.
         # If WatchError is raised in the process, that means something else is
         # modifying the dependency. In this case we simply retry
-        if depends_on is not None:
-            if not isinstance(depends_on, self.job_class):
-                depends_on = Job(id=depends_on, connection=self.connection)
+        if depends_on:
+            if not isinstance(depends_on, list):
+                if not isinstance(depends_on, self.job_class):
+                    depends_on = Job(id=depends_on, connection=self.connection)
+
+                dependencies = [depends_on]
+            else:
+                dependencies = depends_on
+
+            remaining_dependencies = []
             with self.connection._pipeline() as pipe:
                 while True:
                     try:
-                        pipe.watch(depends_on.key)
-                        if depends_on.get_status() != JobStatus.FINISHED:
+                        pipe.watch(*[dependency.key for dependency in dependencies])
+
+                        for dependency in dependencies:
+                            if dependency.get_status() != JobStatus.FINISHED:
+                                remaining_dependencies.append(dependency)
+
+                        if remaining_dependencies:
                             pipe.multi()
                             job.set_status(JobStatus.DEFERRED)
-                            job.register_dependency(pipeline=pipe)
+                            job.register_dependencies(remaining_dependencies,
+                                                      pipeline=pipe)
                             job.save(pipeline=pipe)
                             pipe.execute()
                             return job
@@ -289,7 +302,6 @@ class Queue(object):
 
     def enqueue_dependents(self, job):
         """Enqueues all jobs in the given job's dependents set and clears it."""
-        # TODO: can probably be pipelined
         from .registry import DeferredJobRegistry
 
         while True:
@@ -300,11 +312,14 @@ class Queue(object):
             registry = DeferredJobRegistry(dependent.origin, self.connection)
             with self.connection._pipeline() as pipeline:
                 registry.remove(dependent, pipeline=pipeline)
-                if dependent.origin == self.name:
-                    self.enqueue_job(dependent, pipeline=pipeline)
-                else:
-                    queue = Queue(name=dependent.origin, connection=self.connection)
-                    queue.enqueue_job(dependent, pipeline=pipeline)
+                dependent.remove_dependency(job.id)
+                if not dependent.has_unmet_dependencies():
+                    if dependent.origin == self.name:
+                        self.enqueue_job(dependent, pipeline=pipeline)
+                    else:
+                        queue = Queue(name=dependent.origin,
+                                      connection=self.connection)
+                        queue.enqueue_job(dependent, pipeline=pipeline)
                 pipeline.execute()
 
     def pop_job_id(self):
