@@ -135,9 +135,14 @@ class Job(object):
         job._status = status
         job.meta = meta or {}
 
-        # dependency could be job instance or id
-        if depends_on is not None:
-            job._dependency_id = depends_on.id if isinstance(depends_on, Job) else depends_on
+        # dependencies could be a single job or a list of jobs
+        if depends_on:
+            if isinstance(depends_on, list):
+                job._dependency_ids = [tmp.id for tmp in depends_on]
+            else:
+                job._dependency_ids = ([depends_on.id]
+                    if isinstance(depends_on, Job) else [depends_on])
+
         return job
 
     def get_status(self):
@@ -181,18 +186,39 @@ class Job(object):
         return self.get_status() == JobStatus.STARTED
 
     @property
-    def dependency(self):
-        """Returns a job's dependency. To avoid repeated Redis fetches, we cache
-        job.dependency as job._dependency.
+    def dependencies(self):
+        """Returns a list of job's dependencies. To avoid repeated
+	   Redis fetches, we cache job.dependencies
         """
-        if self._dependency_id is None:
+        if self._dependency_ids is None:
             return None
-        if hasattr(self, '_dependency'):
-            return self._dependency
-        job = Job.fetch(self._dependency_id, connection=self.connection)
-        job.refresh()
-        self._dependency = job
-        return job
+        if hasattr(self, '_dependencies'):
+            return self._dependencies
+        self._dependencies = [Job.fetch(
+            dependency_id, connection=self.connection)
+            for dependency_id in self._dependency_ids]
+
+        for job in self._dependencies:
+            job.refresh()
+        return self._dependencies
+
+    def remove_dependency(self, dependency_id):
+        """Removes a dependency from job. This is usually called when
+        dependency is successfully executed."""
+        # TODO: can probably be pipelined
+        self.connection.srem(self.dependencies_key, dependency_id)
+
+    def has_unmet_dependencies(self):
+        """Checks whether job has dependencies that aren't yet finished."""
+        return bool(self.connection.scard(self.dependencies_key))
+
+    @property
+    def dependents(self):
+        """Returns a list of jobs whose execution depends on this
+        job's successful execution"""
+        dependents_ids = self.connection.smembers(self.dependents_key)
+        return [Job.fetch(id, connection=self.connection)
+                for id in dependents_ids]
 
     @property
     def func(self):
@@ -314,7 +340,7 @@ class Job(object):
         self.result_ttl = None
         self.ttl = None
         self._status = None
-        self._dependency_id = None
+        self._dependency_ids = None
         self.meta = {}
 
     def __repr__(self):  # noqa
@@ -344,8 +370,13 @@ class Job(object):
 
     @classmethod
     def dependents_key_for(cls, job_id):
-        """The Redis key that is used to store job hash under."""
+        """The Redis key that is used to store job dependents hash under."""
         return 'rq:job:{0}:dependents'.format(job_id)
+
+    @classmethod
+    def dependencies_key_for(cls, job_id):
+        """The Redis key that is used to store job dependencies hash under."""
+        return 'rq:job:{0}:dependencies'.format(job_id)
 
     @property
     def key(self):
@@ -354,8 +385,13 @@ class Job(object):
 
     @property
     def dependents_key(self):
-        """The Redis key that is used to store job hash under."""
+        """The Redis key that is used to store job dependents hash under."""
         return self.dependents_key_for(self.id)
+
+    @property
+    def dependencies_key(self):
+        """The Redis key that is used to store job dependancies hash under."""
+        return self.dependencies_key_for(self.id)
 
     @property
     def result(self):
@@ -418,7 +454,7 @@ class Job(object):
         self.timeout = int(obj.get('timeout')) if obj.get('timeout') else None
         self.result_ttl = int(obj.get('result_ttl')) if obj.get('result_ttl') else None  # noqa
         self._status = as_text(obj.get('status') if obj.get('status') else None)
-        self._dependency_id = as_text(obj.get('dependency_id', None))
+        self._dependency_ids = as_text(obj.get('dependency_ids', '')).split(' ')
         self.ttl = int(obj.get('ttl')) if obj.get('ttl') else None
         self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
 
@@ -448,8 +484,8 @@ class Job(object):
             obj['result_ttl'] = self.result_ttl
         if self._status is not None:
             obj['status'] = self._status
-        if self._dependency_id is not None:
-            obj['dependency_id'] = self._dependency_id
+        if self._dependency_ids is not None:
+            obj['dependency_ids'] = ' '.join(self._dependency_ids)
         if self.meta:
             obj['meta'] = dumps(self.meta)
         if self.ttl:
@@ -547,7 +583,7 @@ class Job(object):
             connection = pipeline if pipeline is not None else self.connection
             connection.expire(self.key, ttl)
 
-    def register_dependency(self, pipeline=None):
+    def register_dependencies(self, dependencies, pipeline=None):
         """Jobs may have dependencies. Jobs are enqueued only if the job they
         depend on is successfully performed. We record this relation as
         a reverse dependency (a Redis set), with a key that looks something
@@ -564,7 +600,11 @@ class Job(object):
         registry.add(self, pipeline=pipeline)
 
         connection = pipeline if pipeline is not None else self.connection
-        connection.sadd(Job.dependents_key_for(self._dependency_id), self.id)
+        connection.sadd(Job.dependencies_key_for(self.id),
+            *[dependency.id for dependency in dependencies])
+
+        for dependency in dependencies:
+            connection.sadd(Job.dependents_key_for(dependency.id), self.id)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)
