@@ -195,43 +195,38 @@ class Queue(object):
         # parent's dependents instead of enqueueing it.
         # If WatchError is raised in the process, that means something else is
         # modifying the dependency. In this case we simply retry
-        if depends_on:
-            if not isinstance(depends_on, list):
-                if not isinstance(depends_on, self.job_class):
-                    depends_on = Job(id=depends_on, connection=self.connection)
+        # if depends_on:
+        #     if not isinstance(depends_on, list):
+        #         if not isinstance(depends_on, self.job_class):
+        #             depends_on = Job(id=depends_on, connection=self.connection)
 
-                dependencies = [depends_on]
-            else:
-                dependencies = depends_on
+        #         dependencies = [depends_on]
+        #     else:
+        #         dependencies = depends_on
 
-            remaining_dependencies = []
-            with self.connection._pipeline() as pipe:
-                while True:
-                    try:
-                        pipe.watch(*[dependency.key for dependency in dependencies])
+        #     remaining_dependencies = []
+        #     with self.connection._pipeline() as pipe:
+        #         while True:
+        #             try:
+        #                 pipe.watch(*[dependency.key for dependency in dependencies])
 
-                        for dependency in dependencies:
-                            if dependency.get_status() != JobStatus.FINISHED:
-                                remaining_dependencies.append(dependency)
+        #                 for dependency in dependencies:
+        #                     if dependency.get_status() != JobStatus.FINISHED:
+        #                         remaining_dependencies.append(dependency)
 
-                        if remaining_dependencies:
-                            pipe.multi()
-                            job.set_status(JobStatus.DEFERRED)
-                            job.register_dependencies(remaining_dependencies,
-                                                      pipeline=pipe)
-                            job.save(pipeline=pipe)
-                            pipe.execute()
-                            return job
-                        break
-                    except WatchError:
-                        continue
+        #                 if remaining_dependencies:
+        #                     pipe.multi()
+        #                     job.set_status(JobStatus.DEFERRED)
+        #                     job.register_dependencies(remaining_dependencies,
+        #                                               pipeline=pipe)
+        #                     job.save(pipeline=pipe)
+        #                     pipe.execute()
+        #                     return job
+        #                 break
+        #             except WatchError:
+        #                 continue
 
-        job = self.enqueue_job(job, at_front=at_front)
-
-        if not self._async:
-            job.perform()
-            job.save()
-            job.cleanup(DEFAULT_RESULT_TTL)
+        job = self.enqueue_job(job, at_front=at_front)    
 
         return job
 
@@ -281,6 +276,39 @@ class Queue(object):
         """
         pipe = pipeline if pipeline is not None else self.connection._pipeline()
 
+        depends_on = [self.fetch_job(_id) for _id in job._dependency_ids] if job._dependency_ids else []
+
+        if depends_on:
+            if not isinstance(depends_on, list):
+                if not isinstance(depends_on, self.job_class):
+                    depends_on = Job(id=depends_on, connection=self.connection)
+
+                dependencies = [depends_on]
+            else:
+                dependencies = depends_on
+
+            remaining_dependencies = []
+            # with self.connection._pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(*[dependency.key for dependency in dependencies])
+
+                    for dependency in dependencies:
+                        if dependency.get_status() != JobStatus.FINISHED:
+                            remaining_dependencies.append(dependency)
+
+                    if remaining_dependencies:
+                        pipe.multi()
+                        job.set_status(JobStatus.DEFERRED)
+                        job.register_dependencies(remaining_dependencies,
+                                                  pipeline=pipe)
+                        job.save(pipeline=pipe)
+                        pipe.execute()
+                        return job
+                    break
+                except WatchError:
+                    continue
+
         # Add Queue key set
         pipe.sadd(self.redis_queues_keys, self.key)
         job.set_status(JobStatus.QUEUED, pipeline=pipe)
@@ -297,6 +325,10 @@ class Queue(object):
 
         if self._async:
             self.push_job_id(job.id, at_front=at_front)
+        else:
+            job.perform()
+            job.save()
+            job.cleanup(DEFAULT_RESULT_TTL)
 
         return job
 
