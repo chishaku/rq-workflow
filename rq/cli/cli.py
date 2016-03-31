@@ -7,6 +7,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import os
 import sys
+import importlib
 
 import click
 from redis import StrictRedis
@@ -151,10 +152,15 @@ def info(url, config, path, interval, raw, only_queues, only_workers, by_queue, 
 @click.option('--sentry-dsn', envvar='SENTRY_DSN', help='Report exceptions to this Sentry DSN')
 @click.option('--exception-handler', help='Exception handler(s) to use', multiple=True)
 @click.option('--pid', help='Write the process ID number to a file at the specified path')
+@click.option('--imports', '-i', default='', help='Modules to import.')
 @click.argument('queues', nargs=-1)
 def worker(url, config, burst, name, worker_class, job_class, queue_class, path, results_ttl, worker_ttl,
-           verbose, quiet, sentry_dsn, exception_handler, pid, queues):
+           verbose, quiet, sentry_dsn, exception_handler, pid, imports, queues):
     """Starts an RQ worker."""
+
+    imports = imports.split(':')
+    for i in imports:
+        module = importlib.import_module(i)
 
     if path:
         sys.path = path.split(':') + sys.path
