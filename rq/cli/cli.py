@@ -241,3 +241,16 @@ def resume(url, config):
     connection = connect(url, config)
     connection_resume(connection)
     click.echo("Resuming workers.")
+
+
+@main.command()
+@url_option
+@config_option
+@click.argument('jobs', nargs=-1)
+def enqueue(url, config, jobs):
+    """Enqueue jobs, example: module.MyJob"""
+    for j in jobs:
+        module_name, job_name = j.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        job = getattr(module, job_name)
+        job = job().enqueue()
