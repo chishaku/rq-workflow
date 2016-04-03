@@ -222,14 +222,18 @@ class Job(object):
 
     @property
     def func(self):
+        print('func_name:', self.func_name) 
         func_name = self.func_name
         if func_name is None:
             return None
-
+        print('instance:', self.instance) 
         if self.instance:
             return getattr(self.instance, func_name)
-
-        return import_attribute(self.func_name)
+        try:
+            return import_attribute(self.func_name)
+        except ImportError:
+            print('evaluting func_name:', self.func_name)
+            return eval(self.func_name)
 
     def _unpickle_data(self):
         self._func_name, self._instance, self._args, self._kwargs = unpickle(self.data)

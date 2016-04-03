@@ -158,9 +158,10 @@ def worker(url, config, burst, name, worker_class, job_class, queue_class, path,
            verbose, quiet, sentry_dsn, exception_handler, pid, imports, queues):
     """Starts an RQ worker."""
 
-    imports = imports.split(':')
-    for i in imports:
-        module = importlib.import_module(i)
+    # if imports:
+    #     imports = imports.split(':')
+    # for i in imports:
+    #     module = importlib.import_module(i)
 
     if path:
         sys.path = path.split(':') + sys.path
