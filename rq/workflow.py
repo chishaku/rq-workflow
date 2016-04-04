@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from logging.handlers import TimedRotatingFileHandler
 import inspect
 import collections
@@ -8,9 +9,11 @@ import hashlib
 import click
 import bunch
 import yaml
+import redis
 from redis import StrictRedis
 from rq import Queue, get_failed_queue
 from rq.job import Job as RQJob
+
 
 def init_log(name, console_level=20, file_level=20, filepath='.'):
     log = logging.getLogger(name)
@@ -74,7 +77,7 @@ class Job(object):
     """TODO:Add a preprocessor method that's called in Job.__init__ 
            to replace having to override Job.__init__"""
 
-    def __init__(self, redis_connection=None, queue=None, **kwargs):
+    def __init__(self, **kwargs):
         for k, v in kwargs.iteritems():
             assert k in self._allowed_parameters, "'{}' is an invalid parameter.".format(k)
             setattr(self, k, v)
@@ -88,8 +91,16 @@ class Job(object):
         self._config = {}
         # log.debug('RQ_WORKFLOW_CONFIG.redis.connection_string: ' + self._config.get('redis', {}).get('connection_string'))
         self.redis_conn_string = self._config.get('redis', {}).get('connection') or 'redis://localhost:6379/0'
-        self.redis = redis_connection or StrictRedis.from_url(self.redis_conn_string)
-        self.queue_name = queue or self._config.get('default_queue') or 'rq_workflow'
+        
+        self.REDIS_CONNECTION_PAUSE = 30
+        self.redis = StrictRedis.from_url(self.redis_conn_string)
+        # self.REDIS_POOL = redis.ConnectionPool.from_url(self.redis_conn_string)
+        # self.redis = redis.StrictRedis(connection_pool=self.REDIS_POOL)
+        try:
+            self.queue_name = self.queue 
+        except AttributeError:
+            self.queue_name = self._config.get('default_queue') or 'boom'
+
         self.queue = Queue(name=self.queue_name, connection=self.redis)
         self.dependencies = []
 
@@ -121,18 +132,46 @@ class Job(object):
             return None
 
     def get_job(self):
-        return self.queue.fetch_job(self._job_id)
+        connection_error_count = 0
+        while True:
+            try:
+                return self.queue.fetch_job(self._job_id)
+            except redis.exceptions.ConnectionError:
+                connected_clients = self.redis.info()['connected_clients'] 
+                log.debug('Caught connection error, connected_clients:' + str(connected_clients))
+                log.debug('Error count: {}'.format(connection_error_count))
+                connection_error_count += 1
+                if connection_error_count >= 20:
+                    raise redis.exceptions.ConnectionError
+                time.sleep(self.REDIS_CONNECTION_PAUSE)
+
+        # idle_time = 0
+        # while True:
+        #     try:
+        #         return self.queue.fetch_job(self._job_id)
+        #     except redis.exceptions.ConnectionError:
+        #         raise redis.exceptions.ConnectionError
+                # connected_clients = self.redis.info()['connected_clients'] 
+                # log.debug('Caught connection error, connected_clients:' + str(connected_clients))
+                # while connected_clients > 100:
+                #     msg = '{} sleep, connected_clients:{}'
+                #     log.debug(msg.format(idle_time, connected_clients))
+                #     time.sleep(1)
+                #     idle_time += 1
+                #     if idle_time >= 300:
+                #         raise redis.exceptions.ConnectionError
 
     def enqueue(self):
 
-        log.info('Checking job status: {}'.format(self._job_description))
+        log.info('Checking job status: \n\t\tjob_description: {}\n\t\tjob_id: {}'.format(
+            self._job_description, self._job_id_full))
         job = self.get_job()
         self.status = job.get_status() if job else None
         log.info('Job status: {}'.format(self.status))
         
         if self.status in ['queued', 'started', 'finished']:
-            self.print_summary()
-            return
+            # self.print_summary()
+            return job
 
         # If status is None or deferred, check dependencies
         if self.requires() and self.status in [None, 'deferred']:
@@ -149,7 +188,7 @@ class Job(object):
         if self.status == 'failed':
             failed_queue = get_failed_queue(connection=self.redis)
             failed_queue.requeue(job._id)
-            return
+            return job
 
         # If status not queued, started, finished, deferred failed
         log.debug('status == None, enqueuing job.')
@@ -250,4 +289,4 @@ class Job(object):
     @classmethod
     def _get_job_parameters(cls):
         return [a for a in inspect.getmembers(cls, lambda a:not(inspect.isroutine(a))) 
-                if not a[0].startswith('_')]
+                if not a[0].startswith('_') and a[0] != 'queue']
