@@ -8,7 +8,9 @@ from __future__ import (absolute_import, division, print_function,
 import os
 import sys
 import importlib
+import collections
 
+import bunch
 import click
 from redis import StrictRedis
 from redis.exceptions import ConnectionError
@@ -254,3 +256,37 @@ def enqueue(url, config, jobs):
         module = importlib.import_module(module_name)
         job = getattr(module, job_name)
         job = job().enqueue()
+
+@main.command()
+@url_option
+@config_option
+@click.argument('job', nargs=1)
+def status(url, config, job):
+    """Get the status of a job and its dependencies."""
+
+    module_name, job_name = job.rsplit('.', 1)
+    module = importlib.import_module(module_name)
+    job = getattr(module, job_name)
+    job = job()
+    job.print_summary()
+
+    # cnt = collections.Counter()
+    # summary = bunch.Bunch()
+
+    # 'TODO: recursively walk through dependencies to create summary'
+    # job = self.get_job()
+    # dependencies = job._dependency_ids
+    # for d in dependencies:
+
+    #     # Add summaries recursively
+    #     # dependents = self.redis.smembers('rq:job:' + d)
+
+    #     d = self.queue.fetch_job(d)
+    #     job_name = d.meta['job_name']
+    #     status = d.get_status()
+    #     if job_name in summary:
+    #         summary[job_name][status] += 1
+    #     else:
+    #         summary[job_name] = collections.Counter()
+    #         summary[job_name][status] += 1        
+    # print bunch.bunchify(summary)

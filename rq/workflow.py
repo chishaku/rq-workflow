@@ -9,7 +9,7 @@ import click
 import bunch
 import yaml
 from redis import StrictRedis
-from rq import Queue
+from rq import Queue, get_failed_queue
 from rq.job import Job as RQJob
 
 def init_log(name, console_level=20, file_level=20, filepath='.'):
@@ -84,7 +84,8 @@ class Job(object):
                 setattr(self, k, v)
 
         'TODO: if no env variable, add a default config directory'
-        self._config = load_yaml_config('RQ_WORKFLOW_CONFIG') or {}
+        # self._config = load_yaml_config('RQ_WORKFLOW_CONFIG') or {}
+        self._config = {}
         # log.debug('RQ_WORKFLOW_CONFIG.redis.connection_string: ' + self._config.get('redis', {}).get('connection_string'))
         self.redis_conn_string = self._config.get('redis', {}).get('connection') or 'redis://localhost:6379/0'
         self.redis = redis_connection or StrictRedis.from_url(self.redis_conn_string)
@@ -125,18 +126,33 @@ class Job(object):
     def enqueue(self):
 
         log.info('Checking job status: {}'.format(self._job_description))
-        if self._is_enqueued:
+        job = self.get_job()
+        self.status = job.get_status() if job else None
+        log.info('Job status: {}'.format(self.status))
+        
+        if self.status in ['queued', 'started', 'finished']:
             self.print_summary()
             return
-        log.info('Enqueuing job.')
 
-        if self.requires():
+        # If status is None or deferred, check dependencies
+        if self.requires() and self.status in [None, 'deferred']:
             log.info('Enqueuing dependencies.')
             requires = [self.requires()] if isinstance(self.requires(), Job) else self.requires()
             for job in requires:
                 job = job.enqueue()
                 self.dependencies.append(job)
+        
+        if self.status == 'deferred':
+            self.print_summary()
+            return job
 
+        if self.status == 'failed':
+            failed_queue = get_failed_queue(connection=self.redis)
+            failed_queue.requeue(job._id)
+            return
+
+        # If status not queued, started, finished, deferred failed
+        log.debug('status == None, enqueuing job.')
         if self.run():
             f, args, kwargs = self.run()
         else:
@@ -148,25 +164,8 @@ class Job(object):
                    timeout=-1, result_ttl=-1, ttl=-1, meta=meta,
                    depends_on=self.dependencies)
         
-        # for x in dir(rqjob):
-        #     log.debug(x + '-' +str(getattr(rqjob, x)))
-        
         self.queue.enqueue_job(rqjob)
-        # self.print_summary()
         return rqjob
-
-    @property
-    def _is_enqueued(self):
-        # return self.queue.fetch_job(self._job_id)
-        job = self.get_job()
-        if not job:
-            return
-        self.status = job.get_status()
-        log.info('Job status: {}'.format(self.status))
-        if self.status in ['queued', 'started', 'finished', 'deferred']:
-            return True
-        else: # == 'failed'
-            return False
 
     def print_summary(self):
         # d:
@@ -186,6 +185,10 @@ class Job(object):
         job = self.get_job()
         dependencies = job._dependency_ids
         for d in dependencies:
+
+            # Add summaries recursively
+            # dependents = self.redis.smembers('rq:job:' + d)
+
             d = self.queue.fetch_job(d)
             job_name = d.meta['job_name']
             status = d.get_status()
