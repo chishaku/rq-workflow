@@ -31,7 +31,7 @@ def init_log(name, console_level=20, file_level=20, filepath='.'):
 
     return log
 
-log = init_log('rq-workflow', console_level=10)
+log = init_log('rq_workflow', console_level=10)
 
 def wrapper_job():
     pass
@@ -75,22 +75,28 @@ class Job(object):
            to replace having to override Job.__init__"""
 
     def __init__(self, redis_connection=None, queue=None, **kwargs):
-        for k, v in kwargs.iteritems():
-            assert k in self._allowed_parameters, "'{}' is an invalid parameter.".format(k)
-            setattr(self, k, v)
-        for k, v in self._get_job_parameters():
-            # print k, v
-            if k not in kwargs.keys():
-                setattr(self, k, v)
-
         'TODO: if no env variable, add a default config directory'
+        'TODO: add log path arg and default config option'
         self._config = load_yaml_config('RQ_WORKFLOW_CONFIG') or {}
         # log.debug('RQ_WORKFLOW_CONFIG.redis.connection_string: ' + self._config.get('redis', {}).get('connection_string'))
         self.redis_conn_string = self._config.get('redis', {}).get('connection') or 'redis://localhost:6379/0'
         self.redis = redis_connection or StrictRedis.from_url(self.redis_conn_string)
-        self.queue_name = queue or self._config.get('default_queue') or 'rq_workflow'
+        self.queue_name = self._config.get('default_queue') or 'rq_workflow'
+        if 'queue' in self._get_job_parameters():
+            print (self._get_job_parameters()['queue'] + '\n') * 50
+            self.queue_name = self._get_job_parameters()['queue']
+        if queue:
+            self.queue_name = queue
+        print self.queue_name
         self.queue = Queue(name=self.queue_name, connection=self.redis)
         self.dependencies = []
+        for k, v in kwargs.iteritems():
+            assert k in self._allowed_parameters, "'{}' is an invalid parameter.".format(k)
+            setattr(self, k, v)
+        for k, v in self._get_job_parameters():
+            if k not in kwargs.keys() and k != 'queue':
+                setattr(self, k, v)
+
 
     def requires(self):
         """Return one or more job dependencies"""
